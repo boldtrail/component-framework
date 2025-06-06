@@ -30,7 +30,6 @@ module Component
       Rails.autoloaders.main.ignore("#{components_base_dir}/**/routes.rb")
 
       # add eager and autoload path that will allow to eager load and resolve components with namespaces.
-      # application.config.paths.add(components_base_dir.to_s, eager_load: true)
       application.config.autoload_paths += [components_base_dir.to_s]
       application.config.eager_load_paths += [components_base_dir.to_s]
 
@@ -85,7 +84,7 @@ module Component
         log("Post-Initialize Components")
         components.each do |component|
           initializer = component.const_get(:Initialize)
-            initializer.ready if initializer.respond_to?(:ready)
+          initializer.ready if initializer.respond_to?(:ready)
         end
 
         log("Components Initialization Done")
