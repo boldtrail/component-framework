@@ -121,7 +121,7 @@ module Component
     # @return [Object] Component root module
     def self.component_module_by_name(name)
       return name.camelize.constantize
-    rescue NameError, ArgumentError => e
+    rescue NameError, ArgumentError
       message = "Component #{name} not found"
       log(message)
       raise ComponentNotFoundError, message
