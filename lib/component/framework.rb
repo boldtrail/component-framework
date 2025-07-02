@@ -22,19 +22,17 @@ module Component
       log("Components Initialization Started")
       log("Components Path: #{components_base_dir}")
 
-      # Collapse directory for nested components
+      # Do not use "_components" folder as a part of class namespace, so file like:
+      # components/clients/_components/jon_doe/core/my_class.rb will define a class name:
+      # Clients::JonDoe::MyClass
       Rails.autoloaders.main.collapse("components/*/_components")
 
-      # ignore non standard routes paths
+      # Instruct autoloader not to load route files, they will be loaded by rails automatically
       Rails.autoloaders.main.ignore("#{components_base_dir}/**/routes.rb")
 
       # add eager and autoload path that will allow to eager load and resolve components with namespaces.
       application.config.autoload_paths += [components_base_dir.to_s]
       application.config.eager_load_paths += [components_base_dir.to_s]
-
-      # add each _components dir into paths as well (cut component name off the sub component path)
-      sub_component_paths = get_components.filter_map { |c| c[:path].gsub(/#{c[:name]}$/, "") if c[:sub_component] }
-      sub_component_paths.each { |path| application.config.paths.add(path, eager_load: true) }
 
       log("Discovered Components: #{get_components.map { |c| c[:name] }.join(", ")}")
 
@@ -51,7 +49,9 @@ module Component
       # Register legacy directories under modules
       log("Register legacy directories under modules")
       get_components.each do |component_info|
-        legacy_dir_path = component_info[:path] + "/_legacy"
+        # "_legacy_models" is a special sub directory under each component that is added to load paths so it can have
+        # classes without namespaces. File in components/clients/_legacy_models/client.rb will define class "Client"
+        legacy_dir_path = component_info[:path] + "/_legacy_models"
         if Dir.exist?(legacy_dir_path)
           application.config.autoload_paths << legacy_dir_path
           application.config.eager_load_paths << legacy_dir_path
@@ -66,7 +66,11 @@ module Component
       application.initializer :initialize_components, group: :all do |app|
         components = Component::Framework.get_component_modules(load_initializers: true)
         Component::Framework.log("Initialize Components")
-        components.each { |component| component.const_get(:Initialize).try(:init) }
+        components.each do |component|
+          if component.const_defined?(:Initialize)
+            component.const_get(:Initialize).try(:init)
+          end
+        end
       end
 
       # Post initialization of components
@@ -78,11 +82,41 @@ module Component
 
         log("Post-Initialize Components")
         components.each do |component|
-          initializer = component.const_get(:Initialize)
-          initializer.ready if initializer.respond_to?(:ready)
+          if component.const_defined?(:Initialize)
+            component.const_get(:Initialize).try(:ready)
+          end
         end
 
         log("Components Initialization Done")
+      end
+
+      if Rails.env.development?
+        # In development we use Autoreload Rails feature
+        # it will "unload" all classes/constants on any code change
+        # this leads to breaking all cross-component initialization logic (e.g. changes subscriptions will be lost)
+        # so we reinitialize components in case autoreload happened
+
+        application.reloader.to_prepare do
+          components = Component::Framework.get_components.reject { |c| c[:name] == "tracing" }
+
+          initializers = components.filter_map do |component|
+            next if !File.exist?("#{component[:path]}/initialize.rb") # nothing to reload
+
+            component_module = Object.const_get(component[:name].camelize) # get latest defined constant
+            # "to_prepare" callback may run multiple times during single code reload,
+            # we have to check whether we run already
+            if component_module.const_defined?(:Initialize)
+              break # already initialized
+            end
+
+            require "#{component[:path]}/initialize.rb" # initializers are not managed by zeitwerk, we have to require
+            component_module.const_get(:Initialize)
+          end
+
+          # Re-run initializers
+          initializers&.each { |initializer| initializer.init if initializer.respond_to?(:init) }
+          initializers&.each { |initializer| initializer.ready if initializer.respond_to?(:ready) }
+        end
       end
 
       log("Configuration Finished")
@@ -95,8 +129,7 @@ module Component
       @get_components ||= directories.sort.map do |full_path|
         {
           name: full_path.split(/\/_?components\//).last,
-          path: full_path,
-          sub_component: full_path.include?("_components")
+          path: full_path
         }
       end
     end
@@ -155,8 +188,11 @@ module Component
     def self._load_components_initializers
       # initializers are optional, so ignore the missing ones
       get_components.each do |component_info|
+        # Define module root
         Object.const_set(component_info[:name].camelize, Module.new)
-        require "#{component_info[:path]}/initialize.rb"
+
+        initializer_path = component_info[:path] + "/initialize.rb"
+        require initializer_path if File.exist?(initializer_path)
       end
     end
 

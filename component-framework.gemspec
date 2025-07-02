@@ -14,4 +14,6 @@ Gem::Specification.new do |spec|
   spec.license       = "MIT"
 
   spec.files         = Dir["README.md", "lib/**/*.rb", "LICENSE.txt"]
+
+  spec.add_development_dependency "rails", "~> 8.0"
 end
