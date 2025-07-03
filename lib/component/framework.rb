@@ -175,7 +175,7 @@ module Component
 
     def self._get_component_helpers_paths
       # All helpers paths under /components folder
-      Dir.glob(components_base_dir.join("**/helpers"))
+      Dir.glob(components_base_dir.join("**/helpers")).reject { |path| path.include?("test/") }
     end
 
 
