@@ -15,21 +15,26 @@ module Component
     # Initialize Component Framework
     #
     # @param application [Rails::Application] the application class
-    # @param assets_pipeline [bool] specifies whether Sprockets asset_pipeline should be configured for components
     # @param verbose [bool] allows to show components initialization log, default `false`
-    def self.initialize(application, assets_pipeline: true, verbose: false)
+    def self.initialize(application, verbose: false)
       @verbose = verbose
-
-      # patch Rails
-      require "component/framework/railtie"
 
       log("Components Initialization Started")
       log("Components Path: #{components_base_dir}")
 
-      # add eager and autoload path that will allow to eager load and resolve components with namespaces.
-      application.config.paths.add components_base_dir.to_s, eager_load: true
+      # Do not use "_components" folder as a part of class namespace, so file like:
+      # components/clients/_components/jon_doe/core/my_class.rb will define a class name:
+      # Clients::JonDoe::MyClass
+      Rails.autoloaders.main.collapse("components/*/_components")
 
-      log("Discovered Components: #{get_component_names.join(", ")}")
+      # Instruct autoloader not to load route files, they will be loaded by rails automatically
+      Rails.autoloaders.main.ignore("#{components_base_dir}/**/routes.rb")
+
+      # add eager and autoload path that will allow to eager load and resolve components with namespaces.
+      application.config.autoload_paths += [components_base_dir.to_s]
+      application.config.eager_load_paths += [components_base_dir.to_s]
+
+      log("Discovered Components: #{get_components.map { |c| c[:name] }.join(", ")}")
 
       log("Register DB Migrations")
       _get_component_migrations_paths.each { |path| application.config.paths["db/migrate"].push(path) }
@@ -39,9 +44,18 @@ module Component
 
       log("Register Components Helpers")
       application.config.paths["app/helpers"].unshift(*_get_component_helpers_paths)
+      application.config.autoload_paths += _get_component_helpers_paths
 
-      if assets_pipeline
-        _initialize_assets_pipeline(application)
+      # Register legacy directories under modules
+      log("Register legacy directories under modules")
+      get_components.each do |component_info|
+        # "_legacy_models" is a special sub directory under each component that is added to load paths so it can have
+        # classes without namespaces. File in components/clients/_legacy_models/client.rb will define class "Client"
+        legacy_dir_path = component_info[:path] + "/_legacy_models"
+        if Dir.exist?(legacy_dir_path)
+          application.config.autoload_paths << legacy_dir_path
+          application.config.eager_load_paths << legacy_dir_path
+        end
       end
 
       # Initialize components
@@ -52,7 +66,11 @@ module Component
       application.initializer :initialize_components, group: :all do |app|
         components = Component::Framework.get_component_modules(load_initializers: true)
         Component::Framework.log("Initialize Components")
-        components.each {|component| component.send("init") if component.respond_to?("init") }
+        components.each do |component|
+          if component.const_defined?(:Initialize)
+            component.const_get(:Initialize).try(:init)
+          end
+        end
       end
 
       # Post initialization of components
@@ -63,20 +81,57 @@ module Component
         components = get_component_modules
 
         log("Post-Initialize Components")
-        components.each {|component| component.send("ready") if component.respond_to?("ready") }
+        components.each do |component|
+          if component.const_defined?(:Initialize)
+            component.const_get(:Initialize).try(:ready)
+          end
+        end
 
         log("Components Initialization Done")
+      end
+
+      if Rails.env.development?
+        # In development we use Autoreload Rails feature
+        # it will "unload" all classes/constants on any code change
+        # this leads to breaking all cross-component initialization logic (e.g. changes subscriptions will be lost)
+        # so we reinitialize components in case autoreload happened
+
+        application.reloader.to_prepare do
+          components = Component::Framework.get_components.reject { |c| c[:name] == "tracing" }
+
+          initializers = components.filter_map do |component|
+            next if !File.exist?("#{component[:path]}/initialize.rb") # nothing to reload
+
+            component_module = Object.const_get(component[:name].camelize) # get latest defined constant
+            # "to_prepare" callback may run multiple times during single code reload,
+            # we have to check whether we run already
+            if component_module.const_defined?(:Initialize)
+              break # already initialized
+            end
+
+            require "#{component[:path]}/initialize.rb" # initializers are not managed by zeitwerk, we have to require
+            component_module.const_get(:Initialize)
+          end
+
+          # Re-run initializers
+          initializers&.each { |initializer| initializer.init if initializer.respond_to?(:init) }
+          initializers&.each { |initializer| initializer.ready if initializer.respond_to?(:ready) }
+        end
       end
 
       log("Configuration Finished")
     end
 
-    # List of component names
-    #
-    # @return [Array<string>] List of component names
-    def self.get_component_names
-      Dir.entries(components_base_dir)
-          .select { |entry| (entry !="." && entry != "..") and File.directory? components_base_dir.join(entry) }.sort
+
+    # List of components
+    def self.get_components
+      directories = Dir["#{components_base_dir}/*"] + Dir["#{components_base_dir}/**/_components/*"]
+      @get_components ||= directories.sort.map do |full_path|
+        {
+          name: full_path.split(/\/_?components\//).last,
+          path: full_path
+        }
+      end
     end
 
 
@@ -89,7 +144,7 @@ module Component
         Component::Framework._load_components_initializers
       end
 
-      get_component_names.map { |name| component_module_by_name(name) }
+      get_components.map { |component| component_module_by_name(component[:name]) }
     end
 
 
@@ -109,66 +164,18 @@ module Component
     private
 
 
-    def self._initialize_assets_pipeline(application)
-
-      log("Register Components Assets")
-      application.config.assets.paths += _get_component_assets_paths
-
-
-      # We need to override SassC configuration
-      # so we need to register after SassC app.config.assets.configure
-      application.initializer :setup_component_sass, group: :all, after: :setup_sass do |app|
-
-        require "component/framework/directive_processor"
-
-        app.config.assets.configure do |sprockets_env|
-          Component::Framework.log("Register assets directive processors")
-          sprockets_env.unregister_preprocessor "application/javascript", Sprockets::DirectiveProcessor
-          sprockets_env.unregister_preprocessor "text/css", Sprockets::DirectiveProcessor
-
-          sprockets_env.register_preprocessor "application/javascript", Component::Framework::DirectiveProcessor
-          sprockets_env.register_preprocessor "text/css", Component::Framework::DirectiveProcessor
-
-          if Component::Framework.sass_present?
-            require "component/framework/sass_importer"
-            Component::Framework.log("Add .scss `@import all-components` support")
-            sprockets_env.register_transformer "text/scss", "text/css", Component::Framework::ScssTemplate.new
-            if sprockets_env.respond_to?(:register_engine)
-              sprockets_env.register_engine(".scss", Component::Framework::ScssTemplate, { silence_deprecation: true })
-            else
-              sprockets_env.register_mime_type "text/scss", extensions: [".scss"], charset: :css
-              sprockets_env.register_preprocessor "text/scss", Component::Framework::ScssTemplate
-            end
-          end
-        end
-      end
-    end
-
-
     def self._get_component_migrations_paths
       # All migrations paths under /components folder
-      Dir.glob(components_base_dir.join("**/migrations"))
+      get_components.filter_map do |component|
+        path = component[:path] + "/migrations"
+        Dir.exist?(path) ? path : nil
+      end
     end
 
 
     def self._get_component_helpers_paths
       # All helpers paths under /components folder
-      Dir.glob(components_base_dir.join("**/helpers"))
-    end
-
-
-    def self._get_component_assets_paths
-
-      # All stylesheets paths under /components folder
-      styles = Dir.glob(components_base_dir.join("**/assets/stylesheets")).sort
-
-      # All javascripts paths under /components folder
-      scripts = Dir.glob(components_base_dir.join("**/assets/javascripts")).sort
-
-      # All images paths under /components folder
-      images = Dir.glob(components_base_dir.join("**/assets/images")).sort
-
-      return styles + scripts + images
+      Dir.glob(components_base_dir.join("**/helpers")).reject { |path| path.include?("test/") }
     end
 
 
@@ -180,19 +187,14 @@ module Component
 
     def self._load_components_initializers
       # initializers are optional, so ignore the missing ones
-      get_component_names.each do |name|
-        begin
-          require_dependency(components_base_dir.join("#{name}/initialize"))
-        rescue LoadError
-        end
+      get_components.each do |component_info|
+        # Define module root
+        Object.const_set(component_info[:name].camelize, Module.new)
+
+        initializer_path = component_info[:path] + "/initialize.rb"
+        require initializer_path if File.exist?(initializer_path)
       end
     end
-
-
-    def self.sass_present?
-      defined?(SassC)
-    end
-
 
     def self.log(message)
       return unless @verbose
