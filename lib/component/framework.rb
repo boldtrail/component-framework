@@ -96,19 +96,22 @@ module Component
         # this leads to breaking all cross-component initialization logic (e.g. changes subscriptions will be lost)
         # so we reinitialize components in case autoreload happened
 
-        application.reloader.to_prepare do
-          components = Component::Framework.get_components.reject { |c| c[:name] == "tracing" }
+        # "to_prepare" callback may run multiple times during single code reload,
+        # we use "initialized" variable to ensure we run initializers only once after reach unload
+        initialized = true
 
+        application.reloader.before_class_unload do
+          initialized = false
+        end
+
+        application.reloader.to_prepare do
+          next if initialized
+
+          components = Component::Framework.get_components.reject { |c| c[:name] == "tracing" }
           initializers = components.filter_map do |component|
             next if !File.exist?("#{component[:path]}/initialize.rb") # nothing to reload
 
             component_module = Object.const_get(component[:name].camelize) # get latest defined constant
-            # "to_prepare" callback may run multiple times during single code reload,
-            # we have to check whether we run already
-            if component_module.const_defined?(:Initialize)
-              break # already initialized
-            end
-
             require "#{component[:path]}/initialize.rb" # initializers are not managed by zeitwerk, we have to require
             component_module.const_get(:Initialize)
           end
@@ -116,6 +119,8 @@ module Component
           # Re-run initializers
           initializers&.each { |initializer| initializer.init if initializer.respond_to?(:init) }
           initializers&.each { |initializer| initializer.ready if initializer.respond_to?(:ready) }
+
+          initialized = true
         end
       end
 
