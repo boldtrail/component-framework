@@ -1,3 +1,4 @@
+require "active_support/inflector"
 require "component/framework/version"
 require "component/settings"
 
@@ -107,14 +108,8 @@ module Component
         application.reloader.to_prepare do
           next if initialized
 
-          components = Component::Framework.get_components.reject { |c| c[:name] == "tracing" }
-          initializers = components.filter_map do |component|
-            next if !File.exist?("#{component[:path]}/initialize.rb") # nothing to reload
-
-            component_module = Object.const_get(component[:name].camelize) # get latest defined constant
-            require "#{component[:path]}/initialize.rb" # initializers are not managed by zeitwerk, we have to require
-            component_module.const_get(:Initialize)
-          end
+          components = Component::Framework.get_components.reject { |c| c[:name] == "Tracing" }
+          initializers = components.filter_map { |component| Component::Framework.load_initializer(component) }
 
           # Re-run initializers
           initializers&.each { |initializer| initializer.init if initializer.respond_to?(:init) }
@@ -132,8 +127,10 @@ module Component
     def self.get_components
       directories = Dir["#{components_base_dir}/*"] + Dir["#{components_base_dir}/**/_components/*"]
       @get_components ||= directories.sort.map do |full_path|
+        # Get name with module ("Accounting", "Accounting::Taxes", etc)
+        name = full_path.sub("#{components_base_dir}/", "").gsub("/_components", "").camelize
         {
-          name: full_path.split(/\/_?components\//).last,
+          name: name,
           path: full_path
         }
       end
@@ -144,12 +141,16 @@ module Component
     # @param load_initializers [bool] force component initialize.rb load
     # @return [Array<Object>] List of component root modules
     def self.get_component_modules(load_initializers: false)
+      components = get_components
+
+      components.each { |component_info| _define_component_module(component_info[:name]) }
+
       if load_initializers
         Component::Framework.log("Load Components Initializers")
-        Component::Framework._load_components_initializers
+        components.each { |component_info| load_initializer(component_info) }
       end
 
-      get_components.map { |component| component_module_by_name(component[:name]) }
+      components.map { |component| component_module_by_name(component[:name]) }
     end
 
 
@@ -163,6 +164,24 @@ module Component
       message = "Component #{name} not found"
       log(message)
       raise ComponentNotFoundError, message
+    end
+
+
+    def self.load_initializer(component_info)
+      initializer_path = component_info[:path] + "/initialize.rb"
+      return if !File.exist?(initializer_path)
+
+      # Ensure we have component root defined
+      _define_component_module(component_info[:name])
+
+      require initializer_path
+
+      initializer_name = "#{component_info[:name]}::Initialize"
+      if !Object.const_defined?(initializer_name)
+        raise "Initializer at '#{initializer_path}' must define '#{initializer_name}' class"
+      end
+
+      Object.const_get(initializer_name)
     end
 
 
@@ -190,14 +209,16 @@ module Component
     end
 
 
-    def self._load_components_initializers
-      # initializers are optional, so ignore the missing ones
-      get_components.each do |component_info|
-        # Define module root
-        Object.const_set(component_info[:name].camelize, Module.new)
+    def self._define_component_module(name)
+      # Define module root, it allows not to fail if an initializer has compact class definition
+      # For root components we define empty module at root level, for nested components we have to build the tree, like:
+      # for "Accounting" we define module "Accounting",
+      # for "Accounting::Taxes" we define "Accounting" and then "Taxes" (only when not defined)
+      root = Object
+      name.split("::").each do |part|
+        root.const_set(part, Module.new) if !root.const_defined?(part)
 
-        initializer_path = component_info[:path] + "/initialize.rb"
-        require initializer_path if File.exist?(initializer_path)
+        root = root.const_get(part)
       end
     end
 
