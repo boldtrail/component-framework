@@ -109,7 +109,9 @@ module Component
           next if initialized
 
           components = Component::Framework.get_components.reject { |c| c[:name] == "Tracing" }
-          initializers = components.filter_map { |component| Component::Framework.load_initializer(component) }
+          initializers = components.filter_map do |component|
+            Component::Framework.load_initializer(component_path: component[:path], component_name: component[:name])
+          end
 
           # Re-run initializers
           initializers&.each { |initializer| initializer.init if initializer.respond_to?(:init) }
@@ -147,7 +149,9 @@ module Component
 
       if load_initializers
         Component::Framework.log("Load Components Initializers")
-        components.each { |component_info| load_initializer(component_info) }
+        components.each do |component_info|
+          load_initializer(component_path: component_info[:path], component_name: component_info[:name])
+        end
       end
 
       components.map { |component| component_module_by_name(component[:name]) }
@@ -167,16 +171,16 @@ module Component
     end
 
 
-    def self.load_initializer(component_info)
-      initializer_path = component_info[:path] + "/initialize.rb"
+    def self.load_initializer(component_path:, component_name:)
+      initializer_path = component_path + "/initialize.rb"
       return if !File.exist?(initializer_path)
 
       # Ensure we have component root defined
-      _define_component_module(component_info[:name])
+      _define_component_module(component_name)
 
       require initializer_path
 
-      initializer_name = "#{component_info[:name]}::Initialize"
+      initializer_name = "#{component_name}::Initialize"
       if !Object.const_defined?(initializer_name)
         raise "Initializer at '#{initializer_path}' must define '#{initializer_name}' class"
       end
