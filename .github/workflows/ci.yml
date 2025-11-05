@@ -1,0 +1,56 @@
+name: BM CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    types: [opened, synchronize]
+
+  # allow manual trigger
+  workflow_dispatch:
+
+
+# limit to only one running workflow per PR
+concurrency:
+  group: ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    name: Tests & Linting
+
+    # limit workflow to run only on main repo and not to consume other workflow run quota
+    # but allow manual trigger on forked repos
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'boldtrail/my.brokermint.com'
+
+    env:
+      PR_NUMBER: ${{ github.event.number }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      RAILS_ENV: ci
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: '0'
+
+    # Ruby Setup
+    - name: Setup Ruby and gem caching
+      uses: ruby/setup-ruby@v1
+      with:
+        # ruby-version: 3.1.6 # handled in .ruby-version file
+        bundler-cache: true # runs 'bundle install' and caches installed gems automatically
+
+    - name: Install Bundler
+      run: gem install bundler
+
+    - name: Install Gems
+      run: bundle check --path=vendor/bundle || bundle install --path=vendor/bundle --jobs=4 --retry=3
+
+    - name: Run Minitest Tests
+      if: success() || failure()
+      run: bundle exec rails test "test/**/*_test.rb" -e ci
