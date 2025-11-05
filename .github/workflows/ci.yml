@@ -24,7 +24,7 @@ jobs:
 
     # limit workflow to run only on main repo and not to consume other workflow run quota
     # but allow manual trigger on forked repos
-    if: github.event_name == 'workflow_dispatch' || github.repository == 'boldtrail/my.brokermint.com'
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'boldtrail/component-framework'
 
     env:
       PR_NUMBER: ${{ github.event.number }}
