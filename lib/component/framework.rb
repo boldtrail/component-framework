@@ -129,7 +129,8 @@ module Component
     def self.get_components
       directories = Dir["#{components_base_dir}/*"] + Dir["#{components_base_dir}/**/_components/*"]
       @get_components ||= directories.sort.map do |full_path|
-        # Get name with module ("Accounting", "Accounting::Taxes", etc)
+        # Get module name from component path
+        # e.g. "/app/components/accounting/_components/taxes" -> "Accounting::Taxes"
         name = full_path.sub("#{components_base_dir}/", "").gsub("/_components", "").camelize
         {
           name: name,
