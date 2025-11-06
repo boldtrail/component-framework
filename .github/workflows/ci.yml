@@ -52,5 +52,4 @@ jobs:
       run: bundle check --path=vendor/bundle || bundle install --path=vendor/bundle --jobs=4 --retry=3
 
     - name: Run Minitest Tests
-      if: success() || failure()
       run: bundle exec rails test "test/**/*_test.rb" -e ci
