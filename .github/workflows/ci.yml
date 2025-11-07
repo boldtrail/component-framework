@@ -21,6 +21,8 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     name: Tests & Linting
+    permissions:
+      contents: write
 
     # limit workflow to run only on main repo and not to consume other workflow run quota
     # but allow manual trigger on forked repos
@@ -52,4 +54,25 @@ jobs:
       run: bundle check --path=vendor/bundle || bundle install --path=vendor/bundle --jobs=4 --retry=3
 
     - name: Run Minitest Tests
-      run: bundle exec rails test "test/**/*_test.rb" -e ci
+      run: bundle exec ruby -Ilib -Itest test/*_test.rb
+
+    - name: Create tag
+      if: >
+        success() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/master' &&
+        github.repository == 'boldtrail/component-framework'
+      run: |
+        TAG=v$(ruby -I lib -r component/framework/version -e 'puts Component::Framework::VERSION')
+
+        git fetch --tags --force
+
+        if git rev-parse "$TAG" >/dev/null 2>&1; then
+          echo "Tag $TAG already exists. Skipping."
+          echo "created=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git tag "$TAG"
+        git push origin "$TAG"
+        echo "created=true" >> "$GITHUB_OUTPUT"

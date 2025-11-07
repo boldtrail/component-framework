@@ -15,5 +15,6 @@ Gem::Specification.new do |spec|
 
   spec.files         = Dir["README.md", "lib/**/*.rb", "LICENSE.txt"]
 
-  spec.add_development_dependency "rails", "~> 8.0"
+  spec.add_development_dependency "activesupport", "~> 8.0"
+  spec.add_development_dependency "minitest", "~> 5.26"
 end
